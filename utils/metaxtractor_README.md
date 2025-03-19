@@ -37,9 +37,10 @@ get_psrs_in_field.py (Web parser for Pulsar survey scraper; Provided in reposito
 Packages needed:
 ```
 os, sys, math, logging, ast, optparse, subprocess, numpy, matplotlib, pandas, astropy, psrqpy, bs4, urllib, requests_html   
-
+```
 
 Example command:
+
 ```
 python metaxtractor.py --meta_path /Users/mgps/candidates/20210411/MSGPS_L_2063/metafiles/2021-04-11T18:05:24.meta --known_pulsar PSS --output_path /test
 ```
