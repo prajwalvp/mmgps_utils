@@ -575,10 +575,10 @@ def generate_info_from_meta(opts):
                    'pointing_name', 'utc_obs', 'output_path']
         unpublished_list = pd.DataFrame(columns=Columns)
         unpublished_df = pd.read_csv(opts.htru_unpublished_path)
-        gls = unpublished_df['gl (deg) ']
-        gbs = unpublished_df['gb (deg) ']
+        gls = np.array(unpublished_df['gl (deg) '])
+        gbs = np.array(unpublished_df['gb (deg) '])
         unpublished_psr_coords = SkyCoord(
-            gls*u.deg, gbs*u.deg, frame='galactic').transform_to('icrs')
+        l = gls * u.deg, b = gbs * u.deg, frame='galactic').transform_to('icrs')
         # ras = unpublished_df['RA(deg)']
         # decs = unpublished_df['DEC(deg)']
         # unpublished_psr_coords = SkyCoord(ras*u.deg, decs*u.deg, frame='icrs')
