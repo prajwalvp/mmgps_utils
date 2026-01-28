@@ -205,19 +205,19 @@ def get_Fermi_rq_pulsars(opts, boresight_coords, pointing_name, utc_time, meta_o
     """
     try:
         rq_df = pd.read_csv(
-            '{}/Fermi_radio_quiet_pulsars_public.csv'.format(os.getcwd()))
+            '{}/../data/Fermi_radio_quiet_pulsars_latest_2026.csv'.format(os.getcwd()))
     except Exception as error:
         return None
 
-    fermi_rq_pos = SkyCoord(rq_df['RA (deg)'], rq_df['DEC (deg)'], unit=u.deg)
-    columns = ['Name', 'RA (deg)', 'DEC (deg)', 'P(ms)', 'Edot',
+    fermi_rq_pos = SkyCoord(rq_df['RAJ(deg)'], rq_df['DECJ(deg)'], unit=u.deg)
+    columns = ['Name', 'RAJ(deg)', 'DECJ(deg)', 'P(ms)', 'Edot',
                'Separation(deg)', 'Pointing', 'utc_obs', 'Output path']
     fermi_rq_df = pd.DataFrame(columns=columns)
 
     fermi_rq_cnt = 0
     for i, pos in enumerate(fermi_rq_pos):
         if pos.separation(boresight_coords).deg <= opts.beam_radius*1.05:
-            fermi_rq_df.loc[fermi_rq_cnt] = [rq_df['Name'][i].strip('PSR '),  pos.ra.deg, pos.dec.deg, rq_df['P (ms)'][i], rq_df['Edot'][i], pos.separation(
+            fermi_rq_df.loc[fermi_rq_cnt] = [rq_df['Name'][i].strip('PSR_'),  pos.ra.deg, pos.dec.deg, rq_df['P (ms)'][i], rq_df['Edot'][i], pos.separation(
                 boresight_coords).deg, pointing_name, utc_time, meta_output_path]
             fermi_rq_cnt += 1
 
@@ -226,35 +226,123 @@ def get_Fermi_rq_pulsars(opts, boresight_coords, pointing_name, utc_time, meta_o
 
 def get_Fermi_association(opts, boresight_coords, pointing_name, utc_time, meta_output_path):
     """
-    Write out the possible Fermi associations
+    Write out the possible Fermi associations (4FGL gll_psc_v*.fit compatible)
     """
-    # Read necessary info from FITS file
-    if isinstance(opts.fits_file, type(None)):
-        # fgl4_fits = fits.open('{}/4FGL_DR2_Ppsr.fits'.format(os.getcwd()))[1].data
-        fgl4_fits = fits.open(
-            '{}/utils/4FGL_DR2_Ppsr.fits'.format(os.environ['MGPS_UTILS']))[1].data
+
+    # Tunable pulsar-like heuristic
+    VARIDX_MAX = 18.48
+    SIGCURV_MIN = 4.0
+
+    def as_str(x):
+        if isinstance(x, (bytes, np.bytes_)):
+            return x.decode("utf-8").strip()
+        return str(x).strip()
+
+    def is_blank(x):
+        s = as_str(x)
+        return (s == "") or (s.lower() in {"none", "nan", "null"})
+
+    # Read FITS
+    if opts.fits_file is None:
+        fgl4_fits = fits.open(f"{os.environ['MGPS_UTILS']}/utils/gll_psc_v35.fit")[1].data
     else:
         fgl4_fits = fits.open(opts.fits_file)[1].data
 
-    fgl4_pos = SkyCoord(fgl4_fits.field('RAJ2000'),
-                        fgl4_fits.field('DEJ2000'), unit=u.deg)
-    fgl4_name = fgl4_fits.field('Source_Name')
-    fgl4_val = fgl4_fits.field('P(psr)')
-    fgl4_r95_semi_major = fgl4_fits.field('Conf_95_SemiMajor')
-    fgl4_r95_semi_minor = fgl4_fits.field('Conf_95_SemiMinor')
+    # Positions
+    fgl4_pos = SkyCoord(fgl4_fits.field("RAJ2000"),
+                        fgl4_fits.field("DEJ2000"), unit=u.deg)
 
-    columns = ['Fermi Name', 'RA(deg)', 'DEC (deg)', 'P(psr)', 'r95_semi_major (deg)',
-               'r95_semi_minor (deg)', 'Separation (deg)', 'pointing_name', 'utc_obs', 'output_path']
+    # Columns from base 4FGL
+    fgl4_name = fgl4_fits.field("Source_Name")
+    r95maj = fgl4_fits.field("Conf_95_SemiMajor")
+    r95min = fgl4_fits.field("Conf_95_SemiMinor")
+
+    varidx = fgl4_fits.field("Variability_Index")
+    spectype = fgl4_fits.field("SpectrumType")
+    class1 = fgl4_fits.field("CLASS1")
+    pl_index = fgl4_fits.field("PL_Index")
+    lp_sig = fgl4_fits.field("LP_SigCurv")
+    plec_sig = fgl4_fits.field("PLEC_SigCurv")
+
+    flags = fgl4_fits.field("Flags")
+    ext_name = fgl4_fits.field("Extended_Source_Name")
+    assoc1 = fgl4_fits.field("ASSOC1")
+
+    columns = [
+        "Fermi Name", "RA(deg)", "DEC(deg)",
+        "Assoc1", "CLASS1",
+        "Variability_Index", "SpectrumType", "PL_Index",
+        "LP_SigCurv", "PLEC_SigCurv",
+        "Flags", "Extended_Source_Name",
+        "r95_semi_major (deg)", "r95_semi_minor (deg)",
+        "Separation (deg)",
+        "PSR_like",
+        "pointing_name", "utc_obs", "output_path"
+    ]
     fermi_source_df = pd.DataFrame(columns=columns)
 
     fermi_cnt = 0
     for i, pos in enumerate(fgl4_pos):
-        if pos.separation(boresight_coords).deg <= opts.beam_radius*1.05:
-            fermi_source_df.loc[fermi_cnt] = [fgl4_name[i], pos.ra.deg, pos.dec.deg, fgl4_val[i], fgl4_r95_semi_major[i],
-                                              fgl4_r95_semi_minor[i], pos.separation(boresight_coords).deg, pointing_name, utc_time, meta_output_path]
+        sep_deg = pos.separation(boresight_coords).deg
+        if sep_deg <= opts.beam_radius * 1.05:
+
+            steady = np.isfinite(varidx[i]) and (varidx[i] < VARIDX_MAX)
+            curved = (np.isfinite(lp_sig[i]) and (lp_sig[i] > SIGCURV_MIN)) or \
+                     (np.isfinite(plec_sig[i]) and (plec_sig[i] > SIGCURV_MIN))
+            pointlike = is_blank(ext_name[i])
+            flags_ok = (int(flags[i]) == 0) if np.isfinite(flags[i]) else False
+
+            # I recommend NOT hard-requiring flags_ok for candidate generation:
+            psr_like = steady and curved and pointlike  # (ignore flags by default)
+
+            fermi_source_df.loc[fermi_cnt] = [
+                as_str(fgl4_name[i]), pos.ra.deg, pos.dec.deg,
+                as_str(assoc1[i]), as_str(class1[i]),
+                float(varidx[i]), as_str(spectype[i]), float(pl_index[i]),
+                float(lp_sig[i]), float(plec_sig[i]),
+                int(flags[i]), as_str(ext_name[i]),
+                float(r95maj[i]), float(r95min[i]),
+                sep_deg,
+                bool(psr_like),
+                pointing_name, utc_time, meta_output_path
+            ]
             fermi_cnt += 1
 
     return fermi_source_df
+
+
+
+#def get_Fermi_association(opts, boresight_coords, pointing_name, utc_time, meta_output_path):
+#    """
+#    Write out the possible Fermi associations
+#    """
+#    # Read necessary info from FITS file
+#    if isinstance(opts.fits_file, type(None)):
+#        # fgl4_fits = fits.open('{}/4FGL_DR2_Ppsr.fits'.format(os.getcwd()))[1].data
+#        fgl4_fits = fits.open(
+#            '{}/utils/4FGL_DR2_Ppsr.fits'.format(os.environ['MGPS_UTILS']))[1].data
+#    else:
+#        fgl4_fits = fits.open(opts.fits_file)[1].data
+#
+#    fgl4_pos = SkyCoord(fgl4_fits.field('RAJ2000'),
+#                        fgl4_fits.field('DEJ2000'), unit=u.deg)
+#    fgl4_name = fgl4_fits.field('Source_Name')
+#    fgl4_val = fgl4_fits.field('P(psr)')
+#    fgl4_r95_semi_major = fgl4_fits.field('Conf_95_SemiMajor')
+#    fgl4_r95_semi_minor = fgl4_fits.field('Conf_95_SemiMinor')
+#
+#    columns = ['Fermi Name', 'RA(deg)', 'DEC (deg)', 'P(psr)', 'r95_semi_major (deg)',
+#               'r95_semi_minor (deg)', 'Separation (deg)', 'pointing_name', 'utc_obs', 'output_path']
+#    fermi_source_df = pd.DataFrame(columns=columns)
+#
+#    fermi_cnt = 0
+#    for i, pos in enumerate(fgl4_pos):
+#        if pos.separation(boresight_coords).deg <= opts.beam_radius*1.05:
+#            fermi_source_df.loc[fermi_cnt] = [fgl4_name[i], pos.ra.deg, pos.dec.deg, fgl4_val[i], fgl4_r95_semi_major[i],
+#                                              fgl4_r95_semi_minor[i], pos.separation(boresight_coords).deg, pointing_name, utc_time, meta_output_path]
+#            fermi_cnt += 1
+#
+#    return fermi_source_df
 
 
 def pointInEllipse(x, y, xp, yp, d, D, angle):
@@ -623,23 +711,62 @@ def generate_info_from_meta(opts):
                 '{}/{}_Fermi_associations.csv'.format(opts.output_path, opts.output_name), index=False)
             log.info("{} Fermi associations found and written to {}_Fermi_associations.csv".format(
                 len(fermi_source_df.index), opts.output_name))
-        for index, row in fermi_source_df.iterrows():
+
+
+        for _, row in fermi_source_df.iterrows():
             fermi_coords = SkyCoord(
-                frame='icrs', ra=row[1], dec=row[2], unit=(u.deg, u.deg))
+                frame="icrs", ra=row["RA(deg)"], dec=row["DEC(deg)"], unit=(u.deg, u.deg)
+            )
+
             pixel_fermi_coordinates = convert_equatorial_coordinate_to_pixel(
-                fermi_coords, boresight_coords, time)
+                fermi_coords, boresight_coords, time
+            )
             pixel_fermi_ra = boresight_ra_deg + pixel_fermi_coordinates[0][0]
             pixel_fermi_dec = boresight_dec_deg + pixel_fermi_coordinates[0][1]
-            ax.plot(pixel_fermi_ra, pixel_fermi_dec, '*',
-                    label=row[0] + ' ({})'.format(row[3]), markersize=7.5)
-            if not math.isnan(row[4]):  # If source is extended, skip r95 ellipse plot
-                ellipse = Ellipse(xy=(pixel_fermi_ra, pixel_fermi_dec), width=2.0 *
-                                  row[4], height=2.0*row[5], edgecolor='k', fc='none', lw=1.5, linestyle='--', label='Fermi r95 region')
-                ax.add_patch(ellipse)
-            else:
-                log.info(
-                    "{} is an extended Fermi source. R95 region is invalid".format(row[0]))
 
+            # Choose what to show in the label (Assoc1 if present, else CLASS1, else blank)
+            assoc_label = ""
+            if "Assoc1" in fermi_source_df.columns and isinstance(row["Assoc1"], str) and row["Assoc1"].strip():
+                assoc_label = row["Assoc1"].strip()
+            elif "CLASS1" in fermi_source_df.columns and isinstance(row["CLASS1"], str) and row["CLASS1"].strip():
+                assoc_label = row["CLASS1"].strip()
+
+            ax.plot(
+                pixel_fermi_ra,
+                pixel_fermi_dec,
+                "*",
+                label=f"{row['Fermi Name']} ({assoc_label})",
+                markersize=7.5,
+            )
+
+            # Extended sources: r95 ellipse is not meaningful
+            is_extended = False
+            if "Extended_Source_Name" in fermi_source_df.columns:
+                ext = row["Extended_Source_Name"]
+                is_extended = isinstance(ext, str) and ext.strip() != ""
+
+            if not is_extended:
+                r95maj = row["r95_semi_major (deg)"]
+                r95min = row["r95_semi_minor (deg)"]
+
+                # Only plot if numbers are finite
+                if np.isfinite(r95maj) and np.isfinite(r95min):
+                    ellipse = Ellipse(
+                        xy=(pixel_fermi_ra, pixel_fermi_dec),
+                        width=2.0 * r95maj,
+                        height=2.0 * r95min,
+                        edgecolor="k",
+                        fc="none",
+                        lw=1.5,
+                        linestyle="--",
+                        label="Fermi r95 region",
+                    )
+                    ax.add_patch(ellipse)
+            else:
+                log.info(f"{row['Fermi Name']} is an extended Fermi source. R95 region is invalid")
+        
+
+ 
         # Get Fermi radio quiet sources in field.
         log.info("Checking for Fermi radio quiet pulsars...")
         fermi_rq_df = get_Fermi_rq_pulsars(
